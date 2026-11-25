@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+# A cold stop leaves the X lock and socket behind on the persistent root disk,
+# and Xtigervnc refuses to start while they exist. The supervisor only runs this
+# after the previous server exited, so they are always stale here.
+rm -f /tmp/.X1-lock /tmp/.X11-unix/X1
+mkdir -p /tmp/.X11-unix /tmp/.ICE-unix
+chmod 1777 /tmp/.X11-unix /tmp/.ICE-unix
+
+# -localhost keeps raw VNC off the sandbox's network interface; the only way in
+# from outside is websockify, which requires the token.
+exec runuser -u desktop -- Xtigervnc :1 \
+  -geometry "${ARCHIL_DESKTOP_GEOMETRY:-1920x1080}" \
+  -depth 24 \
+  -rfbport 5901 \
+  -localhost \
+  -SecurityTypes None \
+  -AlwaysShared \
+  -desktop "Archil Desktop"

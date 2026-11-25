@@ -1,0 +1,124 @@
+#!/bin/sh
+# Runs the VNC desktop inside an Archil sandbox as three supervised services:
+#   desktop-vnc      Xtigervnc on :1, VNC on localhost:5901 only
+#   desktop-session  XFCE, as the unprivileged `desktop` user
+#   desktop-novnc    noVNC + websockify on 0.0.0.0:6080, gated by a token
+set -eu
+
+novnc_port=6080
+vnc_target=localhost:5901
+token_file=/etc/archil-desktop/vnc-tokens
+lib=/usr/local/lib/archil-desktop
+
+usage() {
+  cat <<USAGE
+usage: desktopctl <command>
+
+  up [--geometry WxH]   start the desktop (idempotent); prints {"port": ..., "token": ...}
+  token [--rotate]      print the viewer token, optionally replacing it first
+  revoke                replace the token and drop every open viewer connection
+  launch <cmd> [args]   start a GUI program on the desktop, detached from this shell
+  down                  stop the desktop and remove its services
+  status                show the desktop services
+USAGE
+}
+
+write_token() {
+  token=$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')
+  install -d -m 0755 "$(dirname "$token_file")"
+  tmp=$(mktemp "$token_file.XXXXXX")
+  printf '%s: %s\n' "$token" "$vnc_target" >"$tmp"
+  chown desktop:desktop "$tmp"
+  chmod 0600 "$tmp"
+  mv "$tmp" "$token_file"
+}
+
+read_token() {
+  [ -s "$token_file" ] || write_token
+  cut -d: -f1 "$token_file"
+}
+
+ensure_service() {
+  name=$1
+  shift
+  archil-sandbox services get "$name" >/dev/null 2>&1 ||
+    archil-sandbox services create "$name" "$@" >/dev/null
+}
+
+wait_ready() {
+  python3 - "$novnc_port" <<'PY'
+import os, socket, sys, time
+deadline = time.monotonic() + 60
+while True:
+    try:
+        if not os.path.exists("/tmp/.X11-unix/X1"):
+            raise OSError("X server not up")
+        socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=1).close()
+        break
+    except OSError:
+        if time.monotonic() > deadline:
+            sys.exit("desktopctl: desktop did not come up within 60s; "
+                     "see `archil-sandbox services logs desktop-vnc`")
+        time.sleep(0.25)
+PY
+}
+
+cmd_up() {
+  geometry=1920x1080
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      --geometry) geometry=$2; shift 2 ;;
+      *) usage >&2; exit 2 ;;
+    esac
+  done
+  token=$(read_token)
+  ensure_service desktop-vnc --env "ARCHIL_DESKTOP_GEOMETRY=$geometry" -- "$lib/run-vnc"
+  ensure_service desktop-session --after desktop-vnc -- "$lib/run-session"
+  ensure_service desktop-novnc --after desktop-vnc -- "$lib/run-novnc"
+  wait_ready
+  printf '{"port": %s, "token": "%s"}\n' "$novnc_port" "$token"
+}
+
+cmd_token() {
+  case "${1:-}" in
+    --rotate) write_token ;;
+    "") ;;
+    *) usage >&2; exit 2 ;;
+  esac
+  read_token
+}
+
+cmd_revoke() {
+  write_token
+  # websockify relays each viewer in a child process; restarting it closes them all.
+  archil-sandbox services restart desktop-novnc >/dev/null
+}
+
+cmd_launch() {
+  [ $# -gt 0 ] || { usage >&2; exit 2; }
+  # A process started by `sandbox.exec` is killed when the exec returns, so
+  # detach into a new session that outlives it.
+  cd /home/desktop
+  setsid -f runuser -u desktop -- env DISPLAY=:1 "$@" >/dev/null 2>&1 </dev/null
+}
+
+cmd_down() {
+  # `services stop/delete` can hang after the service has already stopped
+  # (no "stopped" event is ever recorded), so don't wait on it forever.
+  for name in desktop-novnc desktop-session desktop-vnc; do
+    timeout 30 archil-sandbox services delete "$name" >/dev/null 2>&1 || true
+  done
+}
+
+command=${1:-}
+[ $# -gt 0 ] && shift
+case "$command" in
+  up) cmd_up "$@" ;;
+  token) cmd_token "$@" ;;
+  revoke) cmd_revoke ;;
+  launch) cmd_launch "$@" ;;
+  down) cmd_down ;;
+  status) archil-sandbox services list ;;
+  -h|--help|help) usage ;;
+  *) usage >&2; exit 2 ;;
+esac

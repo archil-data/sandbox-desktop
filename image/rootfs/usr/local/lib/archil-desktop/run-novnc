@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+# websockify re-reads the token file on every connection, so rotating the token
+# takes effect without a restart.
+exec runuser -u desktop -- websockify \
+  --web /usr/share/novnc \
+  --token-plugin TokenFile \
+  --token-source /etc/archil-desktop/vnc-tokens \
+  0.0.0.0:6080

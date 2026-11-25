@@ -1,0 +1,12 @@
+#!/bin/sh
+set -eu
+export DISPLAY=:1
+# Picks up Xubuntu's theme and panel defaults on Ubuntu; harmless elsewhere.
+export XDG_CONFIG_DIRS=/etc/xdg/xdg-xubuntu:/etc/xdg
+export XDG_DATA_DIRS=/usr/share/xubuntu:/usr/local/share:/usr/share
+export XDG_CURRENT_DESKTOP=XFCE
+until [ -S /tmp/.X11-unix/X1 ]; do sleep 0.2; done
+# Nobody can type a password into a locked screen, so never blank or lock it.
+xset s off -dpms
+cd /home/desktop
+exec runuser -u desktop -- dbus-launch --exit-with-session startxfce4
